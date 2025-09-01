@@ -46,6 +46,41 @@ public sealed class ConditionsService : IConditionsService
         if (metar is null)
         {
             _logger.LogWarning("No METAR returned for {ICAO}", icao);
+<<<<<<< HEAD
+
+#if DEBUG
+                // Always use stub in DEBUG
+                var now = DateTime.UtcNow;
+                var stub = new Metar(icao.ToUpperInvariant(), now, 190m, 12m, 18m, 10m, 4500, 20m, 12m, 30.02m);
+                var stubCat = AviationCalculations.ComputeCategory(stub.CeilingFtAgl, stub.VisibilitySm);
+                var (stubHead, stubCross) = AviationCalculations.WindComponents(runwayHeadingDeg, stub.WindDirDeg, stub.WindKt);
+                var stubElev = _catalog.GetElevationFt(stub.Icao) ?? 0;
+                var stubDa = AviationCalculations.DensityAltitudeFt(stubElev, stub.TemperatureC, stub.AltimeterInHg);
+
+                // Stub branch
+                var stubAgeMinutes = 0;
+                return new AirportConditionsDto {
+                    Icao = stub.Icao,
+                    Category = (int)stubCat,
+                    ObservedUtc = stub.Observed,
+                    WindDirDeg = stub.WindDirDeg,
+                    WindKt = stub.WindKt,
+                    GustKt = stub.GustKt,
+                    VisibilitySm = stub.VisibilitySm,
+                    CeilingFtAgl = stub.CeilingFtAgl,
+                    TemperatureC = stub.TemperatureC,
+                    DewpointC = stub.DewpointC,
+                    AltimeterInHg = stub.AltimeterInHg,
+                    HeadwindKt = stubHead,
+                    CrosswindKt = stubCross,
+                    DensityAltitudeFt = stubDa,
+                    IsStale = false,
+                    AgeMinutes = stubAgeMinutes
+                };
+#else
+            // In release, don't use stub, just return null
+=======
+>>>>>>> master
             return null;
         }
 
@@ -72,9 +107,15 @@ public sealed class ConditionsService : IConditionsService
             icao, da, head, cross);
 
         // Real METAR branch
+<<<<<<< HEAD
+        return new AirportConditionsDto {
+            Icao = metar.Icao,
+            RawMetar = metar.RawMetar,
+=======
         _logger.LogInformation($"Returning real DTO, _stamp.Result={_stamp.Result}");
         var dto = new AirportConditionsDto {
             Icao = icao.ToUpperInvariant(),
+>>>>>>> master
             Category = (int)category,
             ObservedUtc = metar.Observed,
             WindDirDeg = metar.WindDirDeg,

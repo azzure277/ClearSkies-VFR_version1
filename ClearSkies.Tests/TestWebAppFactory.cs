@@ -1,105 +1,59 @@
-using ClearSkies.Domain.Options;
-using Microsoft.Extensions.Caching.Memory;
-using ClearSkies.Infrastructure;
+using Microsoft.AspNetCore.Http;
+using ClearSkies.Tests;
+using ClearSkies.Infrastructure; // For IMetarSource
 
-using System.Linq;
-using ClearSkies.Domain;
-using ClearSkies.Domain.Aviation;
-using ClearSkies.Infrastructure.Weather;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.AspNetCore.Hosting;
+using ClearSkies.Domain;
+using ClearSkies.Api;
 
-public class TestWebAppFactory : WebApplicationFactory<ClearSkies.Api.Program>
+// Test double for deterministic METARs
+public sealed class TestWeatherProvider : IMetarSource
 {
-    public delegate IWeatherProvider ProviderFactory();
+    public Metar? NextMetar { get; set; }
+    public bool FailNext { get; set; }
 
-    private readonly ProviderFactory _providerFactory;
-    private readonly IAirportCatalog _airports;
-    private readonly ClearSkies.Domain.Aviation.IRunwayCatalog _runways;
-    private readonly int _cacheMinutes;
-
-    public TestWebAppFactory(ProviderFactory providerFactory,
-                             IAirportCatalog? airports = null,
-                             ClearSkies.Domain.Aviation.IRunwayCatalog? runways = null,
-                             int cacheMinutes = 1)
+    public Task<Metar?> GetLatestAsync(string icao, CancellationToken ct = default)
     {
-        _providerFactory = providerFactory;
-        _airports = airports ?? new InMemoryAirportsStub();
-        _runways = runways ?? new InMemoryRunwaysStub();
-        _cacheMinutes = cacheMinutes;
+        if (FailNext)
+        {
+            FailNext = false;
+            throw new HttpRequestException("Simulated upstream failure");
+        }
+        // Always return the seeded METAR unless explicitly set to null
+        return Task.FromResult(NextMetar);
     }
+}
+
+public class TestWebAppFactory : WebApplicationFactory<Program>
+{
+    public TestWeatherProvider TestProvider { get; } = new();
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.ConfigureServices(svc =>
+        builder.ConfigureServices(services =>
         {
-            // Remove any existing IWeatherProvider/IAirportCatalog/IRunwayCatalog registrations
-            var toRemove = svc.Where(d =>
-                d.ServiceType == typeof(IWeatherProvider) ||
-                d.ServiceType == typeof(IAirportCatalog) ||
-                d.ServiceType == typeof(ClearSkies.Domain.Aviation.IRunwayCatalog)).ToList();
-            foreach (var d in toRemove) svc.Remove(d);
+            // 1) Use ONE shared MemoryCache across requests
+            services.RemoveAll<IMemoryCache>();
+            services.AddSingleton<IMemoryCache>(_ => new MemoryCache(new MemoryCacheOptions { TrackStatistics = true }));
+            services.AddHttpContextAccessor();
 
-            // Options favorable for tests
-            svc.PostConfigure<WeatherOptions>(o =>
-            {
-                o.CacheMinutes = _cacheMinutes;  // allow per-test control
-                o.StaleAfterMinutes = 15;
-                o.ServeStaleUpToMinutes = 120;   // allow stale serving
-            });
+            // 2) Replace the *inner* provider with the test double
+            services.RemoveAll<IMetarSource>();
+            services.AddSingleton<TestWeatherProvider>(TestProvider);
 
-            svc.AddMemoryCache();
-            svc.AddScoped<ClearSkies.Domain.Diagnostics.ICacheStamp, ClearSkies.Domain.Diagnostics.CacheStamp>();
-
-            // Register the inner toggle provider as a unique type
-            svc.AddScoped<ToggleWeatherProvider>(sp => (ToggleWeatherProvider)_providerFactory());
-            svc.AddScoped<IWeatherProvider>(sp =>
+            // 3) Re-introduce the *caching decorator* as the IMetarSource
+            services.AddSingleton<IMetarSource>(sp =>
                 new CachingWeatherProvider(
-                    sp.GetRequiredService<IMemoryCache>(),
-                    sp.GetRequiredService<ToggleWeatherProvider>(),
-                    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WeatherOptions>>(),
-                    sp.GetRequiredService<ClearSkies.Domain.Diagnostics.ICacheStamp>(),
-                    sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<CachingWeatherProvider>>()
+                    cache: sp.GetRequiredService<IMemoryCache>(),
+                    inner: sp.GetRequiredService<TestWeatherProvider>(),
+                    opt: Microsoft.Extensions.Options.Options.Create(new WeatherOptions { CacheMinutes = 10 }),
+                    httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
+                    etagService: new ClearSkies.Api.Http.EtagService()
                 ));
-
-            svc.AddSingleton(_airports);
-            svc.AddSingleton(_runways);
         });
-    }
-}
-
-// ===== Simple stubs =====
-public sealed class InMemoryAirportsStub : IAirportCatalog
-{
-    public int? GetElevationFt(string icao) => string.Equals(icao, "KSFO", System.StringComparison.OrdinalIgnoreCase) ? 13 : (int?)null;
-}
-
-public sealed class InMemoryRunwaysStub : ClearSkies.Domain.Aviation.IRunwayCatalog
-{
-    public bool TryGetMagneticHeading(string icao, string runwayDesignator, out int magneticHeadingDeg)
-    {
-        if (icao.Equals("KSFO", System.StringComparison.OrdinalIgnoreCase) &&
-            runwayDesignator.Equals("28L", System.StringComparison.OrdinalIgnoreCase))
-        {
-            magneticHeadingDeg = 280;
-            return true;
-        }
-        magneticHeadingDeg = default;
-        return false;
-    }
-
-    public AirportRunways? GetAirportRunways(string icao)
-    {
-        if (icao.Equals("KSFO", System.StringComparison.OrdinalIgnoreCase))
-        {
-            return new AirportRunways(
-                icao,
-                new List<RunwayInfo> {
-                    new RunwayInfo("28L", 28, RunwaySide.Left, 280)
-                }
-            );
-        }
-        return null;
     }
 }
